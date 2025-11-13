@@ -1,50 +1,135 @@
 from ultralytics import YOLO
-import mediapipe as mp
 import cv2
+import threading
+import time
 
-#Modelos
-model = YOLO("best.pt")  # joystick
-mp_hands = mp.solutions.hands.Hands(min_detection_confidence=0.5)
 
-cap = cv2.VideoCapture(0)
+class YOLODetector:
+    def __init__(self):
+        self.model = YOLO("best.pt")
+        self.current_frame = None
+        self.current_results = None
+        self.running = True
+        self.lock = threading.Lock()
+        self.target_fps = 30  
+        self.frame_time = 1.0 / self.target_fps
 
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
-
-    results_joystick = model.predict(frame, conf=0.5, verbose=False)
-    boxes_joystick = results_joystick[0].boxes.xyxy.cpu().numpy()
-    classes_joystick = results_joystick[0].boxes.cls.cpu().numpy()
-
-    #Nombres de las clases
-    class_names = model.names
-
-    #Detección manos
-    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    hands = mp_hands.process(rgb)
-
-    if hands.multi_hand_landmarks:
-        for hand_landmarks in hands.multi_hand_landmarks:
-            mp.solutions.drawing_utils.draw_landmarks(
-                frame, hand_landmarks, mp.solutions.hands.HAND_CONNECTIONS
-            )
-
-    for i, box in enumerate(boxes_joystick):
-        x1, y1, x2, y2 = map(int, box)
-        class_id = int(classes_joystick[i])
-        class_name = class_names[class_id]
-        confidence = results_joystick[0].boxes.conf[i].cpu().numpy()
+    def camera_thread(self):
+        cap = cv2.VideoCapture(0)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
         
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        label = f"{class_name}: {confidence:.2f}"
-        (text_width, text_height), baseline = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.3, 2)
-        cv2.rectangle(frame, (x1, y1 - text_height - 10), (x1 + text_width, y1), (0, 255, 0), -1)
-        cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+        last_capture_time = time.time()
 
-    cv2.imshow("Deteccion", frame)
-    if cv2.waitKey(1) == 27:
-        break
+        while self.running:
+            current_time = time.time()
 
-cap.release()
-cv2.destroyAllWindows()
+            #Limitamos FPS en la camara
+            if current_time - last_capture_time >= self.frame_time:
+                ret, frame = cap.read()
+                if ret:
+                    with self.lock: #PERMITIMOS QUE SOLO UN HILO TRABAJE CON EL FRAME ACTUAL
+                        self.current_frame = frame.copy() #Copiamos el frame para que solo se trabaje con este
+
+                last_capture_time = current_time
+            else:
+                time.sleep(0.001) #Permite que no consuma todo el nucleo
+
+            
+        cap.release()
+
+    def detection_thread(self):
+        last_detection_time = time.time()
+
+        while self.running:
+            current_time = time.time()
+
+            #Limitamos FPS en la deteccion
+            if current_time - last_detection_time >= self.frame_time:
+                if self.current_frame is not None:
+                    with self.lock:
+                        frame_copy = self.current_frame.copy() #Tomamos una copia para trabajar con el
+                    
+                    # Procesar detección
+                    results = self.model.predict(
+                        frame_copy, 
+                        imgsz=320, 
+                        conf=0.5, 
+                        verbose=False
+                    )
+                    
+                    # Actualizar resultados
+                    with self.lock:
+                        self.current_results = results[0]
+                    last_detection_time = current_time
+            else:
+                time.sleep(0.01) 
+
+
+    def run(self):
+        #incializamos hilos
+        cam_thread = threading.Thread(target=self.camera_thread)
+        det_thread = threading.Thread(target=self.detection_thread)
+        
+        #Damos variable para que inice con el programa y cierre con el mismo
+        cam_thread.daemon = True
+        det_thread.daemon = True
+        cam_thread.start()
+        det_thread.start()
+        
+        fps_count = 0
+        fps_time = time.time()
+        last_display_time = time.time()
+        
+        while self.running:
+            current_time = time.time()
+            
+            if current_time - last_display_time >= self.frame_time:
+                last_display_time = current_time
+
+                #Dibujamos el frame acutal
+                if self.current_frame is not None:
+                    display_frame = self.current_frame.copy()
+                    
+                    
+                    if (self.current_results is not None and self.current_results.boxes is not None and len(self.current_results.boxes) > 0):
+                        
+                        boxes = self.current_results.boxes.xyxy.cpu().numpy()
+                        classes = self.current_results.boxes.cls.cpu().numpy()
+                        confidences = self.current_results.boxes.conf.cpu().numpy()
+                        
+                        for _, (box, class_id, confidence) in enumerate(zip(boxes, classes, confidences)):
+                            x1, y1, x2, y2 = map(int, box)
+                            class_id = int(class_id)
+                            class_name = self.model.names[class_id]
+                            confidence = float(confidence)
+                            
+                            cv2.rectangle(display_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                            label = f"{class_name}: {confidence:.2f}"
+                            cv2.putText(display_frame, label, (x1, y1-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    
+                    # FPS
+                    fps_count += 1 #Contamos los frames
+                    if current_time - fps_time >= 1.0: #Si paso mas de un segundo, actuazamos el contador
+                        fps = fps_count
+                        fps_count = 0
+                        fps_time = current_time
+                    
+                    cv2.putText(display_frame, f"FPS: {fps}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+
+                    
+                    cv2.imshow("Detector de joystick", display_frame)
+
+            time.sleep(0.001)
+
+            if cv2.waitKey(1) == 27:
+                self.running = False
+                break
+        
+        cv2.destroyAllWindows()
+
+
+if __name__ == "__main__":
+    detector = YOLODetector()
+    detector.run()
