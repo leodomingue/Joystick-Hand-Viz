@@ -14,6 +14,8 @@ class YOLODetector:
         self.target_fps = 30  
         self.frame_time = 1.0 / self.target_fps
 
+
+
     def camera_thread(self):
         cap = cv2.VideoCapture(0)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -118,12 +120,16 @@ class YOLODetector:
                     
                     cv2.putText(display_frame, f"FPS: {fps}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-                    
+            
+
+
+
                     cv2.imshow("Detector de joystick", display_frame)
 
             time.sleep(0.001)
 
-            if cv2.waitKey(1) == 27:
+            key = cv2.waitKey(1) & 0xFF
+            if key == 27:
                 self.running = False
                 break
         
